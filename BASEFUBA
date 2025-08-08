@@ -1,0 +1,130 @@
+#-----------------------------------------------------------------------
+# SCRIPT PARA LA UNIFICACIÓN DE DATOS Y ESTRUCTURACIÓN FINAL DEL MODELO
+#-----------------------------------------------------------------------
+
+# Paso 0: Instalar y cargar las librerías necesarias
+# Si no las tienes, ejecuta estas líneas una vez:
+# install.packages("dplyr")
+# install.packages("lubridate")
+
+library(dplyr)
+library(lubridate)
+
+#-----------------------------------------------------------------------
+# Paso 1: Cargar tus DOS fuentes de datos
+#-----------------------------------------------------------------------
+
+# --- BASE 1: Historial de Pólizas (la de la imagen) ---
+# Para que el ejemplo sea funcional, simulamos tus datos.
+# NOTA: HE CAMBIADO 'id_cliente' POR 'placa' COMO IDENTIFICADOR PRINCIPAL.
+df_polizas <- data.frame(
+  stringsAsFactors = FALSE,
+  placa = c("314ABH", "314ABH", "314ABH", "314ABH", "314ABH", "788ADK", "788ADK", "ABC123"),
+  id_cliente = c(1227987, 1227987, 1227987, 1288950, 1584855, 9999, 9999, 8888),
+  ANNUAL_PREMIUM = c(714648, 513339, 713242, 540300, 922334, 300000, 320000, 500000),
+  cov_start_date = c("12/07/2019", "01/08/2020", "01/08/2021", "01/08/2022", "01/06/2023", "01/01/2022", "01/01/2023", "15/05/2021"),
+  cov_end_date = c("01/08/2020", "01/08/2021", "01/08/2022", "01/08/2023", "01/06/2024", "01/01/2023", "01/01/2024", "15/05/2022"),
+  DEPARTAMENTO = rep("VALLE DEL CAUCA", 8),
+  VALOR_ASEGURADO = c(10390000, 9900000, 9900000, 9900000, 9900000, 25000000, 26000000, 40000000),
+  MARCA = rep("AKT", 8),
+  CILINDRAJE = rep(197, 8)
+)
+
+
+# --- BASE 2: Historial de Consultas/Cotizaciones (la del archivo) ---
+# Reemplaza "ruta/a/placas_consulta.xlsx" por la ubicación real de tu archivo.
+# df_consultas <- read.csv("ruta/a/placas_consulta.xlsx") 
+df_consultas <- data.frame(
+  stringsAsFactors = FALSE,
+          CIA = c("SOLIDARIA","ALLIANZ","ALLIANZ","ALLIANZ","ALLIANZ",
+                  "ALLIANZ","ALLIANZ","MAPFRE","HDI-LIBERTY",
+                  "HDI-LIBERTY","ALLIANZ","ALLIANZ","AXA COLPATRIA","ESTADO"),
+        PLACA = c("093ACG","119AEH","314ABH","597ACC","599ACC",
+                  "760AFR","788ADK","788ADK","788ADK","788ADK",
+                  "788ADK","788ADK", "ABC123", "ABC123"),
+      VIGENTE = c("NO","SI","SI","NO","NO","SI","NO","NO","NO","NO","NO","SI", "NO", "NO"),
+      AÑO_INI = c(2023L,2025L,2019L,2024L,2024L,2024L,2019L,2020L,
+                  2021L,2022L,2023L,2024L, 2018, 2021),
+      AÑO_FIN = c(2024L,2026L,2025L,2025L,2025L,2026L,2020L,2021L,
+                  2022L,2023L,2024L,2025L, 2019, 2022),
+     CIA_prev = c("","","","","","","","ALLIANZ","MAPFRE",
+                  "HDI-LIBERTY","HDI-LIBERTY","ALLIANZ", "ALLIANZ", "SURAMERICANA"),
+       CAMBIO = c(0L,0L,0L,0L,0L,0L,0L,1L,1L,0L,1L,0L, 1, 1),
+CAMBIOS_ACUMULADOS = c(0L,0L,0L,0L,0L,0L,0L,1L,2L,2L,3L,3L, 2, 17)
+)
+
+
+#-----------------------------------------------------------------------
+# Paso 2: Procesar la BASE 1 (Historial de Pólizas)
+#-----------------------------------------------------------------------
+# Definimos nuestra aseguradora
+NUESTRA_CIA <- "ALLIANZ"
+
+# La lógica es la misma de antes, pero ahora agrupamos por 'placa'.
+df_polizas_preparado <- df_polizas %>%
+  mutate(cov_start_date = dmy(cov_start_date), cov_end_date = dmy(cov_end_date)) %>%
+  arrange(placa, cov_start_date)
+
+fecha_analisis <- as.Date("2025-01-01") # Ajusta esta fecha a tu necesidad
+
+base_modelo_polizas <- df_polizas_preparado %>%
+  group_by(placa) %>%
+  summarise(
+    CHURN = ifelse(max(cov_end_date) < fecha_analisis, 1, 0),
+    Antiguedad_dias = as.numeric(max(cov_end_date) - min(cov_start_date)),
+    Numero_Renovaciones_Propias = n() - 1,
+    Prima_Promedio = mean(ANNUAL_PREMIUM, na.rm = TRUE),
+    Prima_Ultimo_Periodo = last(ANNUAL_PREMIUM),
+    Variacion_Pct_Prima_Ultima_Renovacion = if(n() > 1) {
+      (last(ANNUAL_PREMIUM) - nth(ANNUAL_PREMIUM, -2)) / nth(ANNUAL_PREMIUM, -2)
+    } else { 0 },
+    Departamento = last(DEPARTAMENTO),
+    Marca_Vehiculo = last(MARCA),
+    Cilindraje_Vehiculo = last(CILINDRAJE),
+    .groups = 'drop' # Buena práctica para desagrupar al final
+  )
+
+#-----------------------------------------------------------------------
+# Paso 3: Procesar la BASE 2 (Historial de Consultas)
+#-----------------------------------------------------------------------
+
+resumen_cotizaciones <- df_consultas %>%
+  group_by(PLACA) %>%
+  summarise(
+    # Contamos cuántas cotizaciones fueron con nuestra compañía
+    Consultas_Cotizaciones_Propias = sum(CIA == NUESTRA_CIA, na.rm = TRUE),
+    
+    # Contamos cuántas fueron con la competencia
+    Consultas_Cotizaciones_Otras = sum(CIA != NUESTRA_CIA, na.rm = TRUE),
+    
+    # El número total de cambios de aseguradora en su historial
+    Total_Cambios_Aseguradora = max(CAMBIOS_ACUMULADOS, na.rm = TRUE),
+    
+    # Número total de aseguradoras distintas por las que ha pasado
+    Numero_Aseguradoras_Distintas = n_distinct(CIA, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+#-----------------------------------------------------------------------
+# Paso 4: UNIR (MERGE) AMBAS BASES DE DATOS
+#-----------------------------------------------------------------------
+# Usamos `left_join` para unir el resumen de cotizaciones a nuestra base de pólizas.
+# El "by" le dice a R que la columna 'placa' (en la base 1) y 'PLACA' (en la base 2)
+# son la clave para hacer la unión.
+
+modelo_final_completo <- base_modelo_polizas %>%
+  left_join(resumen_cotizaciones, by = c("placa" = "PLACA")) %>%
+  # Después de la unión, es posible que haya placas sin cotizaciones.
+  # Reemplazamos los valores NA (Not Available) que resultan de la unión con 0.
+  mutate(
+    across(
+      .cols = c(Consultas_Cotizaciones_Propias, Consultas_Cotizaciones_Otras, Total_Cambios_Aseguradora, Numero_Aseguradoras_Distintas),
+      .fns = ~ifelse(is.na(.), 0, .)
+    )
+  )
+
+#-----------------------------------------------------------------------
+# Paso 5: Revisar la base de datos final unificada
+#-----------------------------------------------------------------------
+cat("### BASE DE DATOS FINAL UNIFICADA Y LISTA PARA EL MODELO ###\n\n")
+print(modelo_final_completo)
