@@ -17,6 +17,33 @@ library(randomForest)  # Para el modelo Random Forest
 library(xgboost)       # Para el modelo XGBoost
 library(Matrix)        # Requerido por XGBoost
 
+
+
+set.seed(42)
+split <- sample.split(df_modelar$CHURN, SplitRatio = 0.8)
+train_data <- subset(df_modelar, split == TRUE)
+test_data <- subset(df_modelar, split == FALSE)
+
+
+# --- PASO CLAVE ADICIONAL (Alternativa si no se agrupan categorías) ---
+# Si no usas la estrategia de `fct_lump_n`, necesitarías este paso para unificar.
+# 1. Obtener todos los niveles de los factores del dataset completo
+# levels_marca <- levels(df_modelar$MARCA)
+# levels_depto <- levels(df_modelar$DEPARTAMENTO_MOV)
+#
+# 2. Aplicar estos niveles a los conjuntos de entrenamiento y prueba
+# train_data$MARCA <- factor(train_data$MARCA, levels = levels_marca)
+# test_data$MARCA <- factor(test_data$MARCA, levels = levels_marca)
+# train_data$DEPARTAMENTO_MOV <- factor(train_data$DEPARTAMENTO_MOV, levels = levels_depto)
+# test_data$DEPARTAMENTO_MOV <- factor(test_data$DEPARTAMENTO_MOV, levels = levels_depto)
+# --- Fin del paso clave ---
+
+
+cat("### Verificación de Niveles del Factor 'MARCA' ###\n")
+cat("Niveles en Train:", length(levels(train_data$MARCA)), "\n")
+cat("Niveles en Test:", length(levels(test_data$MARCA)), "\n")
+# Ahora ambos números deberían ser idénticos.
+
 #-------------------------------------------------------------------------------
 # Paso 1: Cargar y Preparar los Datos para el Modelo
 #-------------------------------------------------------------------------------
