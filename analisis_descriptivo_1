@@ -261,3 +261,136 @@ ggplot(tasa_fuga_por_ncl, aes(x = as.factor(NCL), y = Tasa_Fuga)) +
     y = "Tasa de Fuga (%)"
   ) +
   theme_light()
+
+
+
+
+--------------------------------------------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
+# Paso 1: Cargar y Preparar los Datos (Reutilizamos el código anterior)
+#-------------------------------------------------------------------------------
+# df_raw <- read_excel("ruta/a/tu/modelo_completo.xlsx")
+df_raw <- read_excel("modelo_completo.xlsx") 
+
+df_limpio <- df_raw %>%
+  mutate(
+    # Limpieza de variables numéricas y escalado a millones
+    Prima_Ultimo_Periodo = as.numeric(gsub("[\\$\\,\\s]", "", `Prima_Ultimo_Periodo`)),
+    Prima_Ultimo_Periodo_Millones = `Prima_Ultimo_Periodo` / 1000000,
+    NCL = as.numeric(NCL),
+    
+    # Conversión a factor para que R lo trate como categoría
+    CHURN = as.factor(CHURN),
+    DEPARTAMENTO_MOV = as.factor(DEPARTAMENTO_MOV),
+    MARCA = as.factor(MARCA),
+    GENDER = as.factor(GENDER)
+  )
+
+#---------------------------------------------------------------------------------
+# PARTE A: ANÁLISIS DE VARIABLES NUMÉRICAS vs. CHURN
+#---------------------------------------------------------------------------------
+cat("\n### ANÁLISIS DE VARIABLES NUMÉRICAS vs. CHURN ###\n")
+
+# -- 1. Número de Siniestros (NCL) --
+# Resumen numérico:
+df_limpio %>% group_by(CHURN) %>% summarise(Siniestros_Promedio = mean(NCL, na.rm = TRUE))
+# Visualización:
+ggplot(df_limpio, aes(x = CHURN, y = NCL, fill = CHURN)) +
+  geom_boxplot(alpha = 0.8) +
+  labs(title="Relación entre Siniestros y Fuga", y="Número de Siniestros (NCL)") +
+  scale_fill_manual(values = c("0" = "skyblue", "1" = "salmon")) + theme_minimal()
+
+
+# -- 2. Prima del Último Periodo --
+# Resumen numérico:
+df_limpio %>% group_by(CHURN) %>% summarise(Prima_Promedio_Millones = mean(Prima_Ultimo_Periodo_Millones, na.rm = TRUE))
+# Visualización:
+ggplot(df_limpio, aes(x = CHURN, y = Prima_Ultimo_Periodo_Millones, fill = CHURN)) +
+  geom_boxplot(alpha = 0.8) +
+  labs(title="Relación entre Prima y Fuga", y="Prima Último Periodo (Millones)") +
+  scale_fill_manual(values = c("0" = "skyblue", "1" = "salmon")) + theme_minimal()
+
+
+# -- 3. Consultas en Otras Aseguradoras --
+# Resumen numérico:
+df_limpio %>% group_by(CHURN) %>% summarise(Consultas_Otras_Promedio = mean(Consultas_Cotizaciones_Otras, na.rm = TRUE))
+# Visualización:
+ggplot(df_limpio, aes(x = CHURN, y = Consultas_Cotizaciones_Otras, fill = CHURN)) +
+  geom_boxplot(alpha = 0.8) +
+  labs(title="Relación entre Consultas a Competencia y Fuga", y="Número de Consultas en Otras Cias") +
+  scale_fill_manual(values = c("0" = "skyblue", "1" = "salmon")) + theme_minimal()
+
+
+# -- 4. Antigüedad del Vehículo (VEHAGE) --
+# Resumen numérico:
+df_limpio %>% group_by(CHURN) %>% summarise(Antiguedad_Vehiculo_Promedio = mean(VEHAGE, na.rm = TRUE))
+# Visualización:
+ggplot(df_limpio, aes(x = CHURN, y = VEHAGE, fill = CHURN)) +
+  geom_boxplot(alpha = 0.8) +
+  labs(title="Relación entre Antigüedad del Vehículo y Fuga", y="Años del Vehículo (VEHAGE)") +
+  scale_fill_manual(values = c("0" = "skyblue", "1" = "salmon")) + theme_minimal()
+
+
+#---------------------------------------------------------------------------------
+# PARTE B: ANÁLISIS DE VARIABLES CATEGÓRICAS vs. CHURN
+#---------------------------------------------------------------------------------
+cat("\n### ANÁLISIS DE VARIABLES CATEGÓRICAS vs. CHURN ###\n")
+
+# Para este análisis, calcularemos la "Tasa de Fuga" para cada categoría.
+
+# -- 1. Por Departamento --
+tasa_fuga_depto <- df_limpio %>%
+  group_by(DEPARTAMENTO_MOV) %>%
+  summarise(
+    Total_Clientes = n(),
+    Tasa_Fuga = mean(as.numeric(as.character(CHURN)))
+  ) %>%
+  filter(Total_Clientes > 10) %>% # Filtramos deptos con pocos clientes para no sacar conclusiones erróneas
+  arrange(desc(Tasa_Fuga))
+
+print(tasa_fuga_depto)
+# Visualización:
+ggplot(tasa_fuga_depto, aes(x = reorder(DEPARTAMENTO_MOV, Tasa_Fuga), y = Tasa_Fuga)) +
+  geom_bar(stat="identity", fill="darkcyan") +
+  geom_text(aes(label = scales::percent(Tasa_Fuga, accuracy = 0.1)), hjust = -0.1) +
+  scale_y_continuous(labels = scales::percent) +
+  coord_flip() + # Giramos el gráfico para que sea más fácil de leer
+  labs(title="Tasa de Fuga por Departamento", x="Departamento", y="Tasa de Fuga (%)") +
+  theme_light()
+
+
+# -- 2. Por Marca de Vehículo (Top 15) --
+tasa_fuga_marca <- df_limpio %>%
+  group_by(MARCA) %>%
+  summarise(
+    Total_Clientes = n(),
+    Tasa_Fuga = mean(as.numeric(as.character(CHURN)))
+  ) %>%
+  # Nos quedamos con las 15 marcas con más clientes para un gráfico limpio
+  top_n(15, Total_Clientes) %>%
+  arrange(desc(Tasa_Fuga))
+
+print(tasa_fuga_marca)
+# Visualización:
+ggplot(tasa_fuga_marca, aes(x = reorder(MARCA, Tasa_Fuga), y = Tasa_Fuga)) +
+  geom_bar(stat="identity", fill="purple4") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title="Tasa de Fuga por Marca de Vehículo (Top 15)", x="Marca", y="Tasa de Fuga (%)") +
+  theme_light()
+
+
+# -- 3. Por Género --
+tasa_fuga_genero <- df_limpio %>%
+  filter(!is.na(GENDER)) %>%
+  group_by(GENDER) %>%
+  summarise(
+    Tasa_Fuga = mean(as.numeric(as.character(CHURN)))
+  )
+
+print(tasa_fuga_genero)
+# Visualización:
+ggplot(tasa_fuga_genero, aes(x = GENDER, y = Tasa_Fuga, fill = GENDER)) +
+  geom_bar(stat="identity") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title="Tasa de Fuga por Género", x="Género", y="Tasa de Fuga (%)")
