@@ -1,0 +1,166 @@
+library(readxl)
+library(dplyr)
+library(forcats)
+library(caTools)
+library(caret)
+library(pROC)
+library(rpart)
+library(rpart.plot)
+library(ggplot2)
+
+#-------------------------------------------------------------------------------
+# Parte 1: Cargar, Pre-procesar y Dividir los Datos
+#-------------------------------------------------------------------------------
+
+# Cargar los datos
+df_raw <- read_excel("modelo_completo.xlsx")
+
+# Pre-procesamiento robusto de datos
+df_preprocesado <- df_raw %>%
+  mutate(
+    Prima_Ultimo_Periodo = as.numeric(gsub("[\\$\\,\\s]", "", `Prima_Ultimo_Periodo`)),
+    CHURN = as.factor(make.names(CHURN)),
+    NCL = as.numeric(NCL),
+    # Agrupamos categorías raras para que el árbol no se vuelva demasiado complejo
+    MARCA = fct_lump_n(as.factor(MARCA), n = 15, other_level = "Otra_Marca"),
+    DEPARTAMENTO_MOV = fct_lump_n(as.factor(DEPARTAMENTO_MOV), n = 10, other_level = "Otro_Departamento"),
+    GENDER = as.factor(GENDER)
+  ) %>%
+  # Imputación de datos faltantes (NA)
+  mutate(across(where(is.numeric), ~ifelse(is.na(.), median(., na.rm = TRUE), .))) %>%
+  mutate(across(where(is.factor), ~fct_explicit_na(., na_level = "Desconocido")))
+
+# Seleccionar variables finales
+df_modelar <- df_preprocesado %>%
+  select(
+    CHURN, Antiguedad_dias, NCL, Prima_Ultimo_Periodo, Variacion_Pct_Prima_Ultima_Renovacion,
+    VEHAGE, DEPARTAMENTO_MOV, MARCA, AGE, GENDER,
+    Consultas_Cotizaciones_Propias, Consultas_Cotizaciones_Otras
+  )
+
+# Dividir los datos en entrenamiento y prueba
+set.seed(42)
+split <- sample.split(df_modelar$CHURN, SplitRatio = 0.8)
+train_data <- subset(df_modelar, split == TRUE)
+test_data <- subset(df_modelar, split == FALSE)
+
+#-------------------------------------------------------------------------------
+# Parte 2: Construcción y Evaluación de los Modelos
+#-------------------------------------------------------------------------------
+
+# --- Modelo 1: Regresión Logística ---
+cat("\n### Construyendo Modelo 1: Regresión Logística ###\n")
+log_model <- glm(CHURN ~ ., data = train_data, family = "binomial")
+prob_log <- predict(log_model, newdata = test_data, type = "response")
+pred_log <- ifelse(prob_log > 0.5, "X1", "X0")
+conf_matrix_log <- confusionMatrix(as.factor(pred_log), test_data$CHURN)
+
+
+# --- Modelo 2: Árbol de Decisión ---
+cat("\n### Construyendo Modelo 2: Árbol de Decisión ###\n")
+# Usamos rpart.control para evitar que el árbol crezca demasiado
+tree_model <- rpart(CHURN ~ ., data = train_data, method = "class", 
+                    control = rpart.control(minsplit = 20, cp = 0.01))
+pred_tree <- predict(tree_model, newdata = test_data, type = "class")
+conf_matrix_tree <- confusionMatrix(pred_tree, test_data$CHURN)
+
+
+#-------------------------------------------------------------------------------
+# Parte 3: Generación de Gráficos y Tablas para la Presentación
+#-------------------------------------------------------------------------------
+
+cat("\n\n--- GENERANDO VISUALES PARA LA PRESENTACIÓN ---\n\n")
+
+# --- DIAPOSITIVA 2: El Problema - Tasa de Fuga ---
+tasa_fuga_general <- df_modelar %>% summarise(Tasa_Fuga = mean(as.numeric(as.character(CHURN)))) %>% pull(Tasa_Fuga)
+grafico_tasa_fuga <- ggplot(data.frame(Categoria="Tasa de Fuga", Valor=tasa_fuga_general), aes(x=Categoria, y=Valor)) +
+  geom_bar(stat="identity", fill="salmon", width=0.5) +
+  geom_text(aes(label=scales::percent(Valor, accuracy=0.1)), vjust=-0.5, size=6) +
+  scale_y_continuous(labels=scales::percent, limits=c(0, max(tasa_fuga_general)*1.5)) +
+  theme_classic(base_size=16) +
+  labs(title="Tasa de Fuga Histórica en la Cartera", x="", y="Porcentaje de Fuga") +
+  theme(axis.text.x=element_blank(), axis.ticks.x=element_blank())
+ggsave("diapositiva_2_tasa_fuga.png", grafico_tasa_fuga, width=8, height=6)
+print(grafico_tasa_fuga)
+
+
+# --- DIAPOSITIVA 5: RESULTADOS 1 - ¿Qué Tan Bueno es el Modelo? ---
+cat("\n### TABLA PARA DIAPOSITIVA 5: Comparación de Modelos ###\n")
+stats_log <- conf_matrix_log$byClass
+stats_tree <- conf_matrix_tree$byClass
+auc_log <- roc(test_data$CHURN, prob_log)$auc
+auc_tree <- roc(test_data$CHURN, as.numeric(predict(tree_model, newdata=test_data, type="prob")[,2]))$auc
+
+comparacion <- data.frame(
+  Modelo = c("Regresión Logística", "Árbol de Decisión"),
+  Accuracy = c(conf_matrix_log$overall['Accuracy'], conf_matrix_tree$overall['Accuracy']),
+  Sensitivity_Recall = c(stats_log['Sensitivity'], stats_tree['Sensitivity']),
+  Precision = c(stats_log['Precision'], stats_tree['Precision']),
+  AUC = c(auc_log, auc_tree)
+) %>% mutate(across(where(is.numeric), ~round(., 3)))
+print(comparacion)
+
+# Elige el modelo ganador (el de mayor AUC) para el gráfico de la curva ROC
+modelo_ganador <- comparacion$Modelo[which.max(comparacion$AUC)]
+cat("\nModelo Ganador (mayor AUC):", modelo_ganador, "\n")
+roc_obj_ganador <- if(modelo_ganador == "Regresión Logística") roc(test_data$CHURN, prob_log) else roc(test_data$CHURN, as.numeric(predict(tree_model, newdata=test_data, type="prob")[,2]))
+
+grafico_auc <- ggroc(roc_obj_ganador, colour = 'darkgreen', size = 1.5) +
+  geom_segment(aes(x = 1, xend = 0, y = 0, yend = 1), color="grey", linetype="dashed") +
+  theme_minimal(base_size = 14) +
+  ggtitle(paste("Capacidad Predictiva del Modelo:", modelo_ganador)) +
+  annotate("text", x = 0.5, y = 0.5, label = paste("AUC =", round(auc(roc_obj_ganador), 3)), size = 8, color = "darkgreen") +
+  labs(x = "Tasa de Falsos Positivos", y = "Tasa de Verdaderos Positivos")
+ggsave("diapositiva_5_auc_ganador.png", grafico_auc, width=8, height=7)
+print(grafico_auc)
+
+
+# --- DIAPOSITIVA 6: RESULTADOS 2 - ¿POR QUÉ SE VAN? ---
+# Esta diapositiva es perfecta para el Árbol de Decisión porque es muy visual.
+
+cat("\n### GRÁFICO PARA DIAPOSITIVA 6: El Árbol de Decisión ###\n")
+grafico_arbol <- rpart.plot(tree_model,
+           type = 4, # Muestra las probabilidades en cada nodo
+           extra = 101, # Muestra el porcentaje de observaciones en cada nodo
+           box.palette = "BuGn", # Paleta de colores verde
+           leaf.round = 1, # Redondeo de las hojas
+           shadow.col = "gray",
+           main = "Rutas Hacia la Fuga de Clientes")
+# Para guardar este gráfico, necesitas hacerlo desde la ventana de Plots de RStudio
+# o usando el siguiente código si el gráfico ya se imprimió:
+# dev.copy(png, "diapositiva_6_arbol_decision.png", width=1200, height=800)
+# dev.off()
+print("El gráfico del Árbol de Decisión ha sido generado en la ventana de Plots.")
+
+
+# --- DIAPOSITIVA 7: PLAN DE ACCIÓN 1 - Segmentación Inteligente ---
+# Usaremos las reglas del árbol de decisión para definir los perfiles.
+# Por ejemplo, si la primera división es `Consultas_Cotizaciones_Otras >= 3`,
+# ya tenemos nuestro primer perfil.
+
+# La interpretación del árbol (diapositiva 6) es la que alimenta esta diapositiva.
+# Aquí, generamos una tabla de ejemplo basada en una posible primera división.
+# NOTA: Debes adaptar los nombres de las variables y los valores a lo que muestre TU árbol.
+cat("\n### PERFILES PARA DIAPOSITIVA 7: Segmentos del Árbol ###\n")
+
+# Asumamos que el árbol divide por 'Consultas_Cotizaciones_Otras'
+perfil_cazador <- df_modelar %>%
+  filter(Consultas_Cotizaciones_Otras >= 3) %>% # <-- CAMBIA ESTE VALOR SEGÚN TU ÁRBOL
+  summarise(
+    Perfil = "Segmento de Alto Riesgo (Cazadores de Ofertas)",
+    Num_Clientes = n(),
+    Tasa_Fuga_Observada = mean(as.numeric(as.character(CHURN)))
+  )
+
+perfil_leal <- df_modelar %>%
+  filter(Consultas_Cotizaciones_Otras < 3) %>% # <-- CAMBIA ESTE VALOR SEGÚN TU ÁRBOL
+  summarise(
+    Perfil = "Segmento de Bajo Riesgo (Leales/Pasivos)",
+    Num_Clientes = n(),
+    Tasa_Fuga_Observada = mean(as.numeric(as.character(CHURN)))
+  )
+
+tabla_perfiles_arbol <- bind_rows(perfil_cazador, perfil_leal) %>%
+  mutate(across(where(is.numeric), ~round(., 3)))
+
+print(tabla_perfiles_arbol)
