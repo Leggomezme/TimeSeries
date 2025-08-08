@@ -1,0 +1,141 @@
+#-------------------------------------------------------------------------------
+# SCRIPT PARA ANÁLISIS DESCRIPTIVO EXPLORATORIO (AED) DE DATOS DE CHURN
+#-------------------------------------------------------------------------------
+
+# Paso 0: Instalar y cargar las librerías necesarias
+# install.packages("readxl") # Para leer archivos de Excel
+# install.packages("dplyr")    # Para manipulación de datos
+# install.packages("ggplot2")  # Para visualizaciones de alta calidad
+# install.packages("lubridate")# Para manejar fechas
+
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+
+#-------------------------------------------------------------------------------
+# Paso 1: Cargar y Limpiar los Datos
+#-------------------------------------------------------------------------------
+
+# Cargar el archivo de Excel
+# Reemplaza "ruta/a/tu/modelo_completo.xlsx" con la ubicación real
+# df_raw <- read_excel("ruta/a/tu/modelo_completo.xlsx")
+df_raw <- read_excel("modelo_completo.xlsx")
+
+
+# --- Limpieza y Transformación ---
+# Esta parte es CRUCIAL. Convertimos texto a números y escalamos.
+df_limpio <- df_raw %>%
+  mutate(
+    # Limpiar columnas de moneda: quitar "$", espacios, comas y convertir a número
+    Prima_Promedio = as.numeric(gsub("[\\$\\,\\s]", "", Prima_Promedio)),
+    Prima_Ultimo_Periodo = as.numeric(gsub("[\\$\\,\\s]", "", Prima_Ultimo_Periodo)),
+    
+    # ¡LA TRANSFORMACIÓN QUE PEDISTE! Dividir por 1,000,000
+    Prima_Promedio_Millones = Prima_Promedio / 1000000,
+    Prima_Ultimo_Periodo_Millones = Prima_Ultimo_Periodo / 1000000,
+    Valor_Asegurado_Actual_Millones = Valor_Asegurado_Actual / 1000000,
+    
+    # Convertir la variable objetivo y otras clave a factores (categóricas)
+    CHURN = as.factor(CHURN),
+    
+    # Convertir columna de fecha a formato de fecha real
+    Fecha_Ultima_Renovacion = dmy(Fecha_Ultima_Renovacion)
+  ) %>%
+  # Seleccionamos las columnas útiles, incluyendo las nuevas en millones
+  select(
+    ID, CHURN, Antiguedad_dias, Prima_Ultimo_Periodo_Millones, 
+    Valor_Asegurado_Actual_Millones, Variacion_Pct_Prima_Ultima_Renovacion,
+    VEHAGE, DEPARTAMENTO_MOV, MARCA, CLASE, CILINDRAJE, AGE, GENDER,
+    Consultas_Cotizaciones_Propias, Consultas_Cotizaciones_Otras, everything(), 
+    -Prima_Promedio, -Prima_Ultimo_Periodo, -Valor_Asegurado_Actual # Quitamos las viejas
+  )
+
+cat("### Datos Limpios y Transformados (Primeras Filas) ###\n")
+head(df_limpio)
+
+
+#-------------------------------------------------------------------------------
+# Paso 2: Análisis de la Variable Objetivo (CHURN)
+#-------------------------------------------------------------------------------
+cat("\n### Análisis de la Variable Objetivo: CHURN ###\n")
+
+# Calcular la tasa de fuga (churn rate)
+churn_summary <- df_limpio %>%
+  count(CHURN) %>%
+  mutate(Proporcion = n / sum(n))
+
+print(churn_summary)
+
+# Visualizar la distribución del Churn
+ggplot(churn_summary, aes(x = CHURN, y = Proporcion, fill = CHURN)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = scales::percent(Proporcion)), vjust = -0.5) +
+  scale_fill_manual(values = c("0" = "skyblue", "1" = "salmon")) +
+  labs(
+    title = "Distribución de Clientes: Fuga (Churn) vs. Vigentes",
+    x = "Cliente se Fugó (1 = Sí, 0 = No)",
+    y = "Proporción de Clientes"
+  ) +
+  theme_minimal()
+
+
+#-------------------------------------------------------------------------------
+# Paso 3: Análisis Descriptivo de Variables Numéricas Clave
+#-------------------------------------------------------------------------------
+cat("\n### Resumen Estadístico de Variables Numéricas ###\n")
+# Seleccionamos solo las variables numéricas más importantes para el resumen
+df_limpio %>%
+  select(Antiguedad_dias, Prima_Ultimo_Periodo_Millones, Variacion_Pct_Prima_Ultima_Renovacion,
+         VEHAGE, AGE, Consultas_Cotizaciones_Otras) %>%
+  summary()
+
+# Histograma de la Prima del Último Periodo (en millones)
+ggplot(df_limpio, aes(x = Prima_Ultimo_Periodo_Millones)) +
+  geom_histogram(bins = 30, fill = "dodgerblue", alpha = 0.7) +
+  labs(title = "Distribución de Primas del Último Periodo", x = "Prima (en Millones de $)", y = "Frecuencia") +
+  theme_light()
+
+
+#-------------------------------------------------------------------------------
+# Paso 4: Análisis Descriptivo de Variables Categóricas Clave
+#-------------------------------------------------------------------------------
+cat("\n### Frecuencia de las Marcas de Vehículos (Top 10) ###\n")
+df_limpio %>%
+  count(MARCA, sort = TRUE) %>%
+  top_n(10) %>%
+  print()
+
+# Gráfico de barras de los Departamentos más comunes
+ggplot(df_limpio, aes(y = fct_rev(fct_infreq(DEPARTAMENTO_MOV)))) +
+  geom_bar(fill = "forestgreen") +
+  labs(title = "Número de Clientes por Departamento", y = "Departamento", x = "Cantidad de Clientes") +
+  theme_light()
+
+
+#-------------------------------------------------------------------------------
+# Paso 5: BÚSQUEDA DE RELACIONES (Análisis Bivariado vs CHURN)
+# ¡Aquí empezamos a encontrar el "porqué" de la fuga!
+#-------------------------------------------------------------------------------
+cat("\n### Comparación de Características entre Clientes que se Van vs. se Quedan ###\n")
+
+# ¿Cómo se compara la prima entre los que se van y los que se quedan?
+df_limpio %>%
+  group_by(CHURN) %>%
+  summarise(
+    Prima_Promedio = mean(Prima_Ultimo_Periodo_Millones, na.rm = TRUE),
+    Variacion_Prima_Promedio = mean(Variacion_Pct_Prima_Ultima_Renovacion, na.rm = TRUE),
+    Cotizaciones_Otras_Promedio = mean(Consultas_Cotizaciones_Otras, na.rm = TRUE)
+  )
+
+# Visualización con Boxplots (muy potente para comparar distribuciones)
+ggplot(df_limpio, aes(x = CHURN, y = Consultas_Cotizaciones_Otras, fill = CHURN)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("0" = "skyblue", "1" = "salmon")) +
+  labs(
+    title = "Comparación de Cotizaciones en Otras Compañías",
+    subtitle = "¿Cotizan más los clientes que se van?",
+    x = "Cliente se Fugó (1 = Sí, 0 = No)",
+    y = "Número de Cotizaciones en la Competencia"
+  ) +
+  theme_minimal()
