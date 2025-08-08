@@ -1,0 +1,112 @@
+#-------------------------------------------------------------------------------
+# Paso 1: Cargar y Pre-procesamiento Robusto de Datos
+#-------------------------------------------------------------------------------
+
+df_raw <- read_excel("modelo_completo.xlsx")
+
+df_preprocesado <- df_raw %>%
+  mutate(
+    # --- Limpieza y Conversión de Tipos ---
+    Prima_Ultimo_Periodo = as.numeric(gsub("[\\$\\,\\s]", "", `Prima_Ultimo_Periodo`)),
+    CHURN = as.factor(make.names(CHURN)), # Nombres válidos: X0, X1
+    NCL = as.numeric(NCL),
+    
+    # --- LA SOLUCIÓN CLAVE: AGRUPACIÓN DE CATEGORÍAS RARAS ---
+    # Para MARCA, nos quedamos con las 20 más frecuentes. Todas las demás se agrupan
+    # en una nueva categoría llamada "Otra_Marca". Esto resuelve el límite de Random Forest.
+    MARCA = fct_lump_n(as.factor(MARCA), n = 20, other_level = "Otra_Marca"),
+    
+    # Hacemos lo mismo para DEPARTAMENTO, quedándonos con los 15 más comunes.
+    DEPARTAMENTO_MOV = fct_lump_n(as.factor(DEPARTAMENTO_MOV), n = 15, other_level = "Otro_Departamento"),
+    
+    # Convertimos GENDER a factor para el siguiente paso
+    GENDER = as.factor(GENDER)
+  ) %>%
+  
+  # --- Imputación de Datos Faltantes (NA) ---
+  # Se hace DESPUÉS de la agrupación para no interferir.
+  mutate(across(where(is.numeric), ~ifelse(is.na(.), median(., na.rm = TRUE), .))) %>%
+  mutate(across(where(is.factor), ~fct_explicit_na(., na_level = "Desconocido")))
+
+
+# Seleccionamos las variables finales que entrarán al modelo
+df_modelar <- df_preprocesado %>%
+  select(
+    CHURN, Antiguedad_dias, NCL, Prima_Ultimo_Periodo, Variacion_Pct_Prima_Ultima_Renovacion,
+    VEHAGE, DEPARTAMENTO_MOV, MARCA, AGE, GENDER,
+    Consultas_Cotizaciones_Propias, Consultas_Cotizaciones_Otras
+  )
+
+#-------------------------------------------------------------------------------
+# Paso 2: Dividir los Datos en Entrenamiento (80%) y Prueba (20%)
+#-------------------------------------------------------------------------------
+set.seed(42) # Para reproducibilidad
+split <- sample.split(df_modelar$CHURN, SplitRatio = 0.8)
+train_data <- subset(df_modelar, split == TRUE)
+test_data <- subset(df_modelar, split == FALSE)
+
+cat("### Verificación de Niveles de Factores (Post-Agrupación) ###\n")
+cat("Niveles de MARCA:", length(levels(train_data$MARCA)), "\n") # Debería ser 21 (20 + "Otra_Marca") o menos
+cat("Niveles de DEPARTAMENTO:", length(levels(train_data$DEPARTAMENTO_MOV)), "\n") # Debería ser 16 o menos
+
+#-------------------------------------------------------------------------------
+# Paso 3: Modelo 1 - REGRESIÓN LOGÍSTICA
+#-------------------------------------------------------------------------------
+cat("\n### Construyendo Modelo 1: Regresión Logística ###\n")
+log_model <- glm(CHURN ~ ., data = train_data, family = "binomial")
+summary(log_model)
+prob_log <- predict(log_model, newdata = test_data, type = "response")
+pred_log <- ifelse(prob_log > 0.5, "X1", "X0")
+conf_matrix_log <- confusionMatrix(as.factor(pred_log), test_data$CHURN)
+print(conf_matrix_log)
+
+#-------------------------------------------------------------------------------
+# Paso 4: Modelo 2 - RANDOM FOREST (Ahora funcionará sin errores)
+#-------------------------------------------------------------------------------
+cat("\n### Construyendo Modelo 2: Random Forest ###\n")
+rf_model <- randomForest(CHURN ~ ., data = train_data, ntree = 500, mtry = 4, importance = TRUE)
+pred_rf <- predict(rf_model, newdata = test_data)
+conf_matrix_rf <- confusionMatrix(pred_rf, test_data$CHURN)
+print(conf_matrix_rf)
+varImpPlot(rf_model, main="Importancia de Variables (Random Forest)")
+
+#-------------------------------------------------------------------------------
+# Paso 5: Modelo 3 - GRADIENT BOOSTING (XGBoost)
+#-------------------------------------------------------------------------------
+cat("\n### Construyendo Modelo 3: XGBoost ###\n")
+train_matrix <- sparse.model.matrix(CHURN ~ . -1, data = train_data)
+train_label <- as.numeric(as.character(recode(train_data$CHURN, X0 = 0, X1 = 1)))
+dtrain <- xgb.DMatrix(data = train_matrix, label = train_label)
+test_matrix <- sparse.model.matrix(CHURN ~ . -1, data = test_data)
+test_label <- as.numeric(as.character(recode(test_data$CHURN, X0 = 0, X1 = 1)))
+dtest <- xgb.DMatrix(data = test_matrix, label = test_label)
+
+xgb_model <- xgboost(data = dtrain, nrounds = 100, objective = "binary:logistic", eta = 0.1, max_depth = 4, verbose = 0)
+prob_xgb <- predict(xgb_model, newdata = dtest)
+pred_xgb <- ifelse(prob_xgb > 0.5, "X1", "X0")
+conf_matrix_xgb <- confusionMatrix(as.factor(pred_xgb), test_data$CHURN)
+print(conf_matrix_xgb)
+xgb_imp <- xgb.importance(model = xgb_model)
+xgb.plot.importance(importance_matrix = xgb_imp, top_n = 15, main="Importancia de Variables (XGBoost)")
+
+#-------------------------------------------------------------------------------
+# Paso 6: Comparación de Modelos y Conclusiones
+#-------------------------------------------------------------------------------
+cat("\n\n### TABLA COMPARATIVA DE RENDIMIENTO DE MODELOS ###\n\n")
+stats_log <- conf_matrix_log$byClass
+stats_rf <- conf_matrix_rf$byClass
+stats_xgb <- conf_matrix_xgb$byClass
+auc_log <- roc(test_data$CHURN, prob_log)$auc
+auc_rf <- roc(test_data$CHURN, as.numeric(predict(rf_model, newdata=test_data, type="prob")[,2]))$auc
+auc_xgb <- roc(test_label, prob_xgb)$auc
+
+comparacion <- data.frame(
+  Modelo = c("Regresión Logística", "Random Forest", "XGBoost"),
+  Accuracy = c(conf_matrix_log$overall['Accuracy'], conf_matrix_rf$overall['Accuracy'], conf_matrix_xgb$overall['Accuracy']),
+  Sensitivity_Recall = c(stats_log['Sensitivity'], stats_rf['Sensitivity'], stats_xgb['Sensitivity']),
+  Specificity = c(stats_log['Specificity'], stats_rf['Specificity'], stats_xgb['Specificity']),
+  Precision = c(stats_log['Precision'], stats_rf['Precision'], stats_xgb['Precision']),
+  AUC = c(auc_log, auc_rf, auc_xgb)
+)
+
+print(comparacion)
