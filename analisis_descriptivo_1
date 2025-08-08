@@ -139,3 +139,125 @@ ggplot(df_limpio, aes(x = CHURN, y = Consultas_Cotizaciones_Otras, fill = CHURN)
     y = "Número de Cotizaciones en la Competencia"
   ) +
   theme_minimal()
+
+
+
+
+#-----------------------------------------------------------------------------------
+# SCRIPT DE ANÁLISIS DESCRIPTIVO (AED) - VERSIÓN CON NÚMERO DE SINIESTROS (NCL)
+#-----------------------------------------------------------------------------------
+
+# Paso 0: Cargar librerías (si ya están cargadas, puedes omitir esto)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(forcats) # Para manipular factores en ggplot
+
+#-------------------------------------------------------------------------------
+# Paso 1: Cargar y Limpiar los Datos (Incluyendo NCL)
+#-------------------------------------------------------------------------------
+
+# df_raw <- read_excel("ruta/a/tu/modelo_completo.xlsx")
+df_raw <- read_excel("modelo_completo.xlsx") # Asumimos que la columna NCL está aquí
+
+# --- Limpieza y Transformación ---
+df_limpio <- df_raw %>%
+  mutate(
+    Prima_Promedio = as.numeric(gsub("[\\$\\,\\s]", "", `Prima_Promedio`)),
+    Prima_Ultimo_Periodo = as.numeric(gsub("[\\$\\,\\s]", "", `Prima_Ultimo_Periodo`)),
+    
+    Prima_Promedio_Millones = Prima_Promedio / 1000000,
+    Prima_Ultimo_Periodo_Millones = Prima_Ultimo_Periodo / 1000000,
+    Valor_Asegurado_Actual_Millones = `Valor_Asegurado_Actual` / 1000000,
+    
+    # Aseguramos que NCL sea numérica y CHURN sea un factor
+    NCL = as.numeric(NCL),
+    CHURN = as.factor(CHURN),
+    
+    Fecha_Ultima_Renovacion = dmy(Fecha_Ultima_Renovacion)
+  ) %>%
+  # Seleccionamos las columnas que usaremos
+  select(
+    ID, CHURN, Antiguedad_dias, NCL, Prima_Ultimo_Periodo_Millones, 
+    Valor_Asegurado_Actual_Millones, Variacion_Pct_Prima_Ultima_Renovacion,
+    VEHAGE, DEPARTAMENTO_MOV, MARCA, CLASE, CILINDRAJE, AGE, GENDER,
+    Consultas_Cotizaciones_Propias, Consultas_Cotizaciones_Otras
+  )
+
+cat("### Datos Limpios y Transformados (Primeras Filas) ###\n")
+head(df_limpio)
+
+#-------------------------------------------------------------------------------
+# Paso 2: Análisis Descriptivo de NCL y otras Variables Numéricas
+#-------------------------------------------------------------------------------
+cat("\n### Resumen Estadístico de Variables Numéricas (Incluyendo NCL) ###\n")
+df_limpio %>%
+  select(Antiguedad_dias, NCL, Prima_Ultimo_Periodo_Millones, 
+         Variacion_Pct_Prima_Ultima_Renovacion, Consultas_Cotizaciones_Otras) %>%
+  summary()
+
+# Visualizar la distribución del Número de Siniestros (NCL)
+ggplot(df_limpio, aes(x = as.factor(NCL))) +
+  geom_bar(fill = "darkgoldenrod1") +
+  geom_text(stat='count', aes(label=..count..), vjust=-0.5) +
+  labs(
+    title = "Distribución del Número de Siniestros (NCL) por Póliza",
+    x = "Cantidad de Siniestros (NCL)",
+    y = "Número de Clientes"
+  ) +
+  theme_classic()
+
+#-------------------------------------------------------------------------------
+# Paso 3: BÚSQUEDA DE RELACIONES - El impacto de NCL en el CHURN
+# ¡Aquí probamos nuestras hipótesis!
+#-------------------------------------------------------------------------------
+cat("\n### Impacto del Número de Siniestros (NCL) en la Fuga (CHURN) ###\n")
+
+# 1. Comparar el promedio de siniestros entre los que se van y los que se quedan
+promedio_siniestros_churn <- df_limpio %>%
+  group_by(CHURN) %>%
+  summarise(
+    Siniestros_Promedio = mean(NCL, na.rm = TRUE),
+    Prima_Promedio_Millones = mean(Prima_Ultimo_Periodo_Millones, na.rm = TRUE),
+    Cotizaciones_Otras_Promedio = mean(Consultas_Cotizaciones_Otras, na.rm = TRUE)
+  )
+
+print(promedio_siniestros_churn)
+
+# 2. Visualización con Boxplot para comparar la distribución de NCL
+ggplot(df_limpio, aes(x = CHURN, y = NCL, fill = CHURN)) +
+  geom_boxplot(alpha = 0.8) +
+  scale_fill_manual(values = c("0" = "skyblue", "1" = "salmon")) +
+  labs(
+    title = "Comparación del Número de Siniestros vs. Fuga",
+    subtitle = "¿Los clientes que se van tienen un historial de siniestros diferente?",
+    x = "Cliente se Fugó (1 = Sí, 0 = No)",
+    y = "Número de Siniestros (NCL)"
+  ) +
+  theme_minimal()
+
+# 3. (MUY REVELADOR) Calcular la TASA DE FUGA para cada valor de NCL
+tasa_fuga_por_ncl <- df_limpio %>%
+  group_by(NCL) %>%
+  summarise(
+    Total_Clientes = n(),
+    Clientes_Fugados = sum(as.numeric(as.character(CHURN))),
+    Tasa_Fuga = Clientes_Fugados / Total_Clientes
+  ) %>%
+  arrange(desc(Tasa_Fuga))
+
+cat("\n### Tasa de Fuga por Cantidad de Siniestros ###\n")
+print(tasa_fuga_por_ncl)
+
+# Visualizar la Tasa de Fuga por NCL
+ggplot(tasa_fuga_por_ncl, aes(x = as.factor(NCL), y = Tasa_Fuga)) +
+  geom_bar(stat = "identity", fill = "firebrick") +
+  geom_text(aes(label = scales::percent(Tasa_Fuga, accuracy = 0.1)), vjust = -0.5) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Tasa de Fuga por Número de Siniestros",
+    x = "Cantidad de Siniestros (NCL)",
+    y = "Tasa de Fuga (%)"
+  ) +
+  theme_light()
