@@ -1,0 +1,112 @@
+#-----------------------------------------------------------------------
+# SCRIPT PARA LA TRANSFORMACIÓN DE DATOS DE SEGUROS A MODELO DE FUGA
+#-----------------------------------------------------------------------
+
+# Paso 0: Instalar y cargar las librerías necesarias
+# Si no las tienes, ejecuta estas líneas una vez:
+# install.packages("dplyr")
+# install.packages("lubridate")
+
+library(dplyr)
+library(lubridate)
+
+#-----------------------------------------------------------------------
+# Paso 1: Cargar tus datos
+#-----------------------------------------------------------------------
+# Asumimos que tus datos están en un archivo CSV. Debes reemplazar
+# "ruta/a/tus/datos.csv" con la ubicación real de tu archivo.
+# df_original <- read.csv("ruta/a/tus/datos.csv")
+
+# Para que este ejemplo sea funcional, creamos un dataframe que simula
+# la estructura de tu imagen.
+df_original <- data.frame(
+  stringsAsFactors = FALSE,
+  placa = c("314ABH", "314ABH", "314ABH", "314ABH", "314ABH", "CLIENTE_B", "CLIENTE_B"),
+  id_cliente = c(1227987, 1227987, 1227987, 1288950, 1584855, 9999999, 9999999),
+  ANNUAL_PREMIUM = c(714648, 513339, 713242, 540300, 922334, 450000, 460000),
+  cov_start_date = c("12/07/2019", "01/08/2020", "01/08/2021", "01/08/2022", "01/06/2023", "15/05/2021", "15/05/2022"),
+  cov_end_date = c("01/08/2020", "01/08/2021", "01/08/2022", "01/08/2023", "01/06/2024", "15/05/2022", "15/05/2023"),
+  DEPARTAMENTO = rep("VALLE DEL CAUCA", 7),
+  VALOR_ASEGURADO = c(10390000, 9900000, 9900000, 9900000, 9900000, 8000000, 8200000),
+  MARCA = rep("AKT", 7),
+  CILINDRAJE = rep(197, 7)
+)
+
+
+#-----------------------------------------------------------------------
+# Paso 2: Limpieza y preparación de los datos
+#-----------------------------------------------------------------------
+# Convertimos las columnas de fecha a un formato que R entiende.
+# La función dmy() asume el formato día-mes-año.
+df_preparado <- df_original %>%
+  mutate(
+    cov_start_date = dmy(cov_start_date),
+    cov_end_date = dmy(cov_end_date),
+    # Nos aseguramos de que las columnas clave sean numéricas
+    ANNUAL_PREMIUM = as.numeric(ANNUAL_PREMIUM),
+    VALOR_ASEGURADO = as.numeric(VALOR_ASEGURADO)
+  )
+
+#-----------------------------------------------------------------------
+# Paso 3: Transformación y creación de características (Feature Engineering)
+#-----------------------------------------------------------------------
+# El objetivo es crear UNA fila por cada 'id_cliente'.
+
+# Definimos una "fecha de análisis". Cualquier cliente cuya póliza
+# haya vencido ANTES de esta fecha se considerará un cliente que no renovó (fugado).
+# DEBES AJUSTAR ESTA FECHA AL PERÍODO QUE QUIERES ANALIZAR.
+fecha_analisis <- as.Date("2024-07-01")
+
+modelo_base <- df_preparado %>%
+  # Es CRUCIAL ordenar por fecha para que los cálculos de "último valor" sean correctos.
+  arrange(id_cliente, cov_start_date) %>%
+  # Agrupamos por cliente para calcular sus estadísticas agregadas.
+  group_by(id_cliente) %>%
+  # Creamos las nuevas columnas resumiendo la historia del cliente.
+  summarise(
+    # --- VARIABLE OBJETIVO (CHURN / FUGA) ---
+    # Si la fecha de fin de la última póliza es anterior a nuestra fecha de análisis,
+    # el cliente se considera "fugado". 1 = Fuga, 0 = Vigente.
+    CHURN = ifelse(max(cov_end_date) < fecha_analisis, 1, 0),
+
+    # --- CARACTERÍSTICAS DE ANTIGÜEDAD Y ACTIVIDAD ---
+    Antiguedad_dias = as.numeric(max(cov_end_date) - min(cov_start_date)),
+    Fecha_Ultima_Renovacion = max(cov_end_date),
+    Numero_Renovaciones = n() - 1,
+
+    # --- CARACTERÍSTICAS CLAVE DE PRECIO Y VALOR ---
+    Prima_Promedio = mean(ANNUAL_PREMIUM, na.rm = TRUE),
+    Prima_Ultimo_Periodo = last(ANNUAL_PREMIUM),
+    Valor_Asegurado_Actual = last(VALOR_ASEGURADO),
+    
+    # --- CARACTERÍSTICAS PARA DETECTAR SENSIBILIDAD AL PRECIO ---
+    # Calculamos el cambio porcentual en la prima en la última renovación.
+    # Esta es una variable muy poderosa para tu objetivo.
+    Variacion_Pct_Prima_Ultima_Renovacion = if(n() > 1) {
+      (last(ANNUAL_PREMIUM) - nth(ANNUAL_PREMIUM, -2)) / nth(ANNUAL_PREMIUM, -2)
+    } else {
+      0 # Si es un cliente nuevo, no hay variación.
+    },
+    
+    # ¿El cliente ha cambiado el valor asegurado? Puede indicar búsqueda de ahorro.
+    Numero_Cambios_Valor_Asegurado = n_distinct(VALOR_ASEGURADO) - 1,
+
+    # --- CARACTERÍSTICAS DEMOGRÁFICAS/ESTÁTICAS DEL CLIENTE/VEHÍCULO ---
+    # Tomamos los valores de la última póliza, ya que son los más recientes.
+    Departamento = last(DEPARTAMENTO),
+    Marca_Vehiculo = last(MARCA),
+    Cilindraje_Vehiculo = last(CILINDRAJE)
+    
+  ) %>%
+  # Desagrupamos para que la tabla sea estándar de nuevo.
+  ungroup()
+
+#-----------------------------------------------------------------------
+# Paso 4: Revisar la base de datos final
+#-----------------------------------------------------------------------
+cat("### Base de Datos Transformada y Lista para el Modelo ###\n\n")
+print(modelo_base)
+
+cat("\n### Descripción de las Nuevas Columnas ###\n")
+# Muestra un resumen de la estructura final
+str(modelo_base)
